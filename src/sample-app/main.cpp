@@ -65,6 +65,7 @@ static void fn(struct mg_connection *c, int ev, void *ev_data, void *fn_data) {
                     }
                 }
                 response_list += "]";
+                response_list += "\n"; // append new line, so there is no "partial line"
                 mg_http_reply(c, 200, "Content-Type: text/plain\r\n", response_list.c_str());
                 break;
             }
@@ -72,12 +73,12 @@ static void fn(struct mg_connection *c, int ev, void *ev_data, void *fn_data) {
                 std::cout << "BODY\n" << message.body.ptr << "\nEND BODY\n";
                 messages.push_back(std::string{message.body.ptr});
 
-                mg_http_reply(c, 200, "Content-Type: text/plain\r\n", "Message %s logged", messages.back().c_str());
+                mg_http_reply(c, 200, "Content-Type: text/plain\r\n", "Message \"%s\" logged\n", messages.back().c_str());
                 break;
             }
             default: {
                 std::cout << "Unknown request type\n";
-                mg_http_reply(c, 400, "Content-Type: text/plain\r\n", "Unknown request type");
+                mg_http_reply(c, 400, "Content-Type: text/plain\r\n", "Unknown request type\n");
                 break;
             }
         }
