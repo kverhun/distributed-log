@@ -92,6 +92,8 @@ AppConfig ParseCmdArgs(int argc, char** argv)
 
 int main(int argc, char** argv)
 {
+    // TODO: weird port if no arguments specified
+
     AppConfig app_config = ParseCmdArgs(argc, argv);
 
     // initialize app server

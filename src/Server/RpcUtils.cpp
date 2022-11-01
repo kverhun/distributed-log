@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <iostream>
+#include <memory>
 
 namespace network {
 
