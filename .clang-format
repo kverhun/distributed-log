@@ -1,0 +1,28 @@
+BasedOnStyle: Google
+AccessModifierOffset: -4
+AlignAfterOpenBracket: BlockIndent
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterCaseLabel:   false
+  AfterClass:       true
+  AfterControlStatement: false
+  AfterEnum:        true
+  AfterFunction:    true
+  AfterNamespace:   false
+  AfterStruct:      true
+  AfterUnion:       true
+  AfterExternBlock: false
+  BeforeCatch:      true
+  BeforeElse:       true
+  IndentBraces:     false
+BreakConstructorInitializers: BeforeComma
+ColumnLimit: 120
+ConstructorInitializerIndentWidth: 8
+IndentWidth: 4
+IndentWrappedFunctionNames: true
+DerivePointerAlignment: false
+FixNamespaceComments: true
+PointerAlignment: Left
+TabWidth: 4
+NamespaceIndentation: None
+...
