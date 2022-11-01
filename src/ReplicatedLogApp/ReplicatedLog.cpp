@@ -27,7 +27,7 @@ public:
     ~Timer()
     {
         const auto duration = std::chrono::steady_clock::now() - m_start_time;
-        const auto ms = std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
         std::cout << "Timer " << m_title << ": " << ms << "ms.\n";
     }
 
