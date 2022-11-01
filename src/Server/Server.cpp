@@ -26,11 +26,12 @@ std::string ToString(RequestType rt) {
     }
 }
 
+/**
+ * @brief Parse "method" of HTTP request and get request type
+ */
 RequestType GetRequestType(const mg_http_message& message) {
     const char* post_str{"POST"};
     const char* get_str{"GET"};
-
-    std::cout << "GetRequestType:" << message.headers[0].value.ptr << "\n";
 
     if (strlen(message.method.ptr) >= strlen(get_str)
         && !strncmp(message.method.ptr, get_str, strlen(get_str))) {
@@ -45,11 +46,10 @@ RequestType GetRequestType(const mg_http_message& message) {
     return RequestType::Unknown;
 }
 
-static void mongoose_handler(mg_connection *c, int ev, void *ev_data, void *fn_data);
-
-
+/**
+ * Mongoose handler. Will be called on each connection poll.
+ */
 void mongoose_handler(mg_connection *c, int ev, void *ev_data, void *fn_data) {
-    // print mg_connection->address -> localhost + port. based on port determine who is the sender
     Server* server = static_cast<Server*>(fn_data);
 
     if (ev == MG_EV_HTTP_MSG) {
@@ -81,6 +81,7 @@ void mongoose_handler(mg_connection *c, int ev, void *ev_data, void *fn_data) {
 Server::Server(size_t port)
         : m_port(port) {
     mg_mgr_init(&m_mongoose_manager);
+
     std::string address = "http://localhost:";
     address += std::to_string(m_port);
     std::cout << "Server on url: " << address << " created\n";
