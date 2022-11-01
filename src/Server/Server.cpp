@@ -53,7 +53,7 @@ RequestType GetRequestType(const mg_http_message& message)
 void mongoose_handler(mg_connection* c, int ev, void* ev_data, void* fn_data)
 {
     Server* server = static_cast<Server*>(fn_data);
-
+    
     if (ev == MG_EV_HTTP_MSG) {
         auto& message = *static_cast<mg_http_message*>(ev_data);
 
@@ -83,7 +83,7 @@ Server::Server(size_t port) : m_port(port)
 {
     mg_mgr_init(&m_mongoose_manager);
 
-    std::string address = "http://localhost:";
+    std::string address = "http://0.0.0.0:";
     address += std::to_string(m_port);
     std::cout << "Server on url: " << address << " created\n";
     mg_http_listen(&m_mongoose_manager, address.c_str(), mongoose_handler, this);
