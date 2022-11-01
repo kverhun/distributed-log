@@ -12,7 +12,8 @@ namespace network {
  * @brief Server class provides a simple abstraction for a web-server
  * Current implementation is based on Mongoose server
  */
-class Server {
+class Server
+{
 public:
     Server(size_t port);
     Server(const Server&) = delete;
@@ -46,7 +47,7 @@ public:
     void Listen(const std::atomic_bool& stopped);
 
 private:
-    friend void mongoose_handler(mg_connection *c, int ev, void *ev_data, void *fn_data);
+    friend void mongoose_handler(mg_connection* c, int ev, void* ev_data, void* fn_data);
 
     std::string OnGetRequest(const std::string&);
     std::string OnPostRequest(const std::string& request_body);
@@ -55,8 +56,8 @@ private:
     size_t m_port;
     Server::RequestHandler m_handler_get;
     Server::RequestHandler m_handler_post;
-    
+
     mg_mgr m_mongoose_manager;
 };
 
-}
+}  // namespace network

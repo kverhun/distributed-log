@@ -1,3 +1,6 @@
+#include <RpcUtils.h>
+#include <Server.h>
+
 #include <chrono>
 #include <future>
 #include <iostream>
@@ -5,26 +8,29 @@
 #include <string>
 #include <vector>
 
-#include <RpcUtils.h>
-#include <Server.h>
-
-int RandomTimeoutMs() {
+int RandomTimeoutMs()
+{
     std::random_device rd;
     std::mt19937 gen(rd());
     std::uniform_int_distribution<> distr(100, 3000);
     return distr(gen);
 }
 
-class Timer {
+/**
+ * @brief Helper class to measure time
+ */
+class Timer
+{
 public:
-    Timer(const std::string& title)
-            : m_title(title)
-            , m_start_time(std::chrono::steady_clock::now()) {}
-    ~Timer() {
+    Timer(const std::string& title) : m_title(title), m_start_time(std::chrono::steady_clock::now()) {}
+
+    ~Timer()
+    {
         const auto duration = std::chrono::steady_clock::now() - m_start_time;
         const auto ms = std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
         std::cout << "Timer " << m_title << ": " << ms << "ms.\n";
     }
+
 private:
     std::string m_title;
     std::chrono::steady_clock::time_point m_start_time;
@@ -38,7 +44,8 @@ std::vector<std::string> InMemoryMessageStorage;
 /**
  * Returns list of messages as a single string. To be used to form http requests reply.
  */
-std::string MessageListResponseStr(const std::vector<std::string>& messages) {
+std::string MessageListResponseStr(const std::vector<std::string>& messages)
+{
     std::string res = "[";
     if (!messages.empty()) {
         res += messages.front();
@@ -54,7 +61,8 @@ std::string MessageListResponseStr(const std::vector<std::string>& messages) {
 /**
  * Specifies configuration of replication system
  */
-struct AppConfig {
+struct AppConfig
+{
     /**
      * App will use this port for server
      */
@@ -70,7 +78,8 @@ struct AppConfig {
 /**
  * @brief parse command line arguments and return `AppConfig`
  */
-AppConfig ParseCmdArgs(int argc, char** argv) {
+AppConfig ParseCmdArgs(int argc, char** argv)
+{
     AppConfig config;
     if (argc > 1) {
         config.this_app_port = std::atoi(argv[1]);
@@ -81,7 +90,8 @@ AppConfig ParseCmdArgs(int argc, char** argv) {
     return config;
 }
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv)
+{
     AppConfig app_config = ParseCmdArgs(argc, argv);
 
     // initialize app server
@@ -97,25 +107,23 @@ int main(int argc, char** argv) {
         const auto response = network::PostHttpAndWaitReply(url, message);
         // TODO: synchronize log by mutex
         std::cout << "Response from secondary (" << url << "): " << response;
-        return true; // for now - assume no failures
+        return true;  // for now - assume no failures
     };
 
     // POST request handler: receive message
-    server.SetRequestHandlerPost([&](const std::string& str){
+    server.SetRequestHandlerPost([&](const std::string& str) {
         Timer timer{"Post request handling"};
         std::cout << "Post message: " << str << "\n";
 
         // perform replication if secondary nodes registered
         if (!secondary_nodes_urls.empty()) {
             std::vector<std::future<bool>> replication_results;
-            for (const auto &secondary_url: secondary_nodes_urls) {
-                replication_results.push_back(std::async([&]() {
-                    return perform_replication(secondary_url, str);
-                }));
+            for (const auto& secondary_url : secondary_nodes_urls) {
+                replication_results.push_back(std::async([&]() { return perform_replication(secondary_url, str); }));
             }
 
             bool success = true;
-            for (auto &f: replication_results) {
+            for (auto& f : replication_results) {
                 if (!f.get()) {
                     // assume doesn't happen for v1
                     std::cerr << "Replication failed\n";
@@ -141,7 +149,7 @@ int main(int argc, char** argv) {
     });
 
     // GET request handler: return list of messages from in-memory storage
-    server.SetRequestHandlerGet([](const std::string& str){
+    server.SetRequestHandlerGet([](const std::string& str) {
         std::cout << "Get message: " << str << "\n";
         return MessageListResponseStr(InMemoryMessageStorage);
     });
