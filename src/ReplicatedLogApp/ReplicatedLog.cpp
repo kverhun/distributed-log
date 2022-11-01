@@ -1,9 +1,34 @@
+#include <chrono>
+#include <future>
 #include <iostream>
+#include <random>
 #include <string>
 #include <vector>
 
 #include <RpcUtils.h>
 #include <Server.h>
+
+int RandomTimeoutMs() {
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<> distr(100, 3000);
+    return distr(gen);
+}
+
+class Timer {
+public:
+    Timer(const std::string& title)
+            : m_title(title)
+            , m_start_time(std::chrono::steady_clock::now()) {}
+    ~Timer() {
+        const auto duration = std::chrono::steady_clock::now() - m_start_time;
+        const auto ms = std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
+        std::cout << "Timer " << m_title << ": " << ms << "ms.\n";
+    }
+private:
+    std::string m_title;
+    std::chrono::steady_clock::time_point m_start_time;
+};
 
 /**
  * In-memory message storage
@@ -57,8 +82,6 @@ AppConfig ParseCmdArgs(int argc, char** argv) {
 }
 
 int main(int argc, char** argv) {
-    std::atomic_bool stopped = false;
-
     AppConfig app_config = ParseCmdArgs(argc, argv);
 
     // initialize app server
@@ -70,20 +93,50 @@ int main(int argc, char** argv) {
         secondary_nodes_urls.push_back("http://localhost:" + std::to_string(port));
     }
 
+    auto perform_replication = [](const std::string& url, const std::string& message) -> bool {
+        const auto response = network::PostHttpAndWaitReply(url, message);
+        // TODO: synchronize log by mutex
+        std::cout << "Response from secondary (" << url << "): " << response;
+        return true; // for now - assume no failures
+    };
+
     // POST request handler: receive message
     server.SetRequestHandlerPost([&](const std::string& str){
+        Timer timer{"Post request handling"};
         std::cout << "Post message: " << str << "\n";
 
-        // perform blocking replication to secondary nodes
-        for (const auto& secondary_url : secondary_nodes_urls) {
-            const auto response = network::PostHttpAndWaitReply(secondary_url, str);
-            std::cout << "Response from secondary (" << secondary_url << "): " << response;
-            // add proper response check. for now assume response = request successful
+        // perform replication if secondary nodes registered
+        if (!secondary_nodes_urls.empty()) {
+            std::vector<std::future<bool>> replication_results;
+            for (const auto &secondary_url: secondary_nodes_urls) {
+                replication_results.push_back(std::async([&]() {
+                    return perform_replication(secondary_url, str);
+                }));
+            }
+
+            bool success = true;
+            for (auto &f: replication_results) {
+                if (!f.get()) {
+                    // assume doesn't happen for v1
+                    std::cerr << "Replication failed\n";
+                    success = false;
+                }
+            }
+
+            if (!success) {
+                return std::string("Message \"" + str + "\" declined");
+            }
+        }
+
+        // for testing purposes - random timeout
+        if (secondary_nodes_urls.empty()) {
+            const auto timeout_ms = RandomTimeoutMs();
+            std::cout << "Delay for " << timeout_ms << "ms\n";
+            std::this_thread::sleep_for(std::chrono::milliseconds(timeout_ms));
         }
 
         // add to in-memory storage only after replication performed
         InMemoryMessageStorage.push_back(str);
-
         return std::string("Message \"" + str + "\" accepted\n");
     });
 
@@ -94,6 +147,7 @@ int main(int argc, char** argv) {
     });
 
     // run server
+    std::atomic_bool stopped = false;
     server.Listen(stopped);
 
     return 0;
