@@ -83,7 +83,7 @@ Server::Server(size_t port) : m_port(port)
 {
     mg_mgr_init(&m_mongoose_manager);
 
-    std::string address = "http://0.0.0.0:";
+    std::string address = "http://localhost:";
     address += std::to_string(m_port);
     std::cout << "Server on url: " << address << " created\n";
     mg_http_listen(&m_mongoose_manager, address.c_str(), mongoose_handler, this);
