@@ -37,23 +37,28 @@ private:
     std::chrono::steady_clock::time_point m_start_time;
 };
 
+struct Message {
+    std::string message;
+    size_t id;
+};
+
 /**
  * In-memory message storage
  */
-std::vector<std::string> InMemoryMessageStorage;
+std::vector<Message> InMemoryMessageStorage;
 
 /**
  * Returns list of messages as a single string. To be used to form http requests reply.
  */
-std::string MessageListResponseStr(const std::vector<std::string>& messages)
+std::string MessageListResponseStr(const std::vector<Message>& messages)
 {
     std::string res = "[";
     if (!messages.empty()) {
-        res += messages.front();
+        res += messages.front().message;
     }
     for (auto i = 1u; i < messages.size(); ++i) {
         res += ", ";
-        res += messages[i];
+        res += messages[i].message;
     }
     res += "]\n";
     return res;
@@ -77,18 +82,21 @@ std::string ConstructAck(const std::string& message) {
  * Post message content
  */
 struct PostContent {
-    size_t write_concern{0u};
+    size_t write_concern{1u};
     std::string message;
 };
 
-PostContent ParsePostMessage(const std::string& post_message) {
+/**
+ * Parse string in format "[number]message" into <number, message>
+ */
+std::pair<size_t, std::string> ParseMessage(const std::string& post_message) {
     if (post_message.empty()) {
-        return PostContent{};
+        return std::make_pair(0u, "");
     }
 
     // no write concern specified
     if (post_message[0] != '[') {
-        return PostContent{0u, post_message};
+        return std::make_pair(0u, post_message);
     }
 
     const auto close_bracket_idx = post_message.find_first_of(']');
@@ -96,24 +104,24 @@ PostContent ParsePostMessage(const std::string& post_message) {
         std::string content_between_brackets;
         content_between_brackets.assign(post_message.begin() + 1, post_message.begin() + close_bracket_idx);
         try {
-            const size_t write_concern = std::atoi(content_between_brackets.c_str());
+            const size_t number_in_brackets = std::atoi(content_between_brackets.c_str());
             std::string message;
             message.assign(post_message.begin() + close_bracket_idx + 1, post_message.end());
-            return PostContent{
-                write_concern,
+            return std::make_pair(
+                number_in_brackets,
                 message
-            };
+            );
         }
         catch (...) {
             std::cout << "Fail to parse post message: " << post_message << "\n";
         }
     }
 
-    // parsing write concern unsuccessful
-    return PostContent {
-        0u,
+    // parsing write concern unsuccessful - pass message as is
+    return std::make_pair(
+        1u,
         post_message
-    };
+    );
 }
 
 /**
@@ -171,19 +179,23 @@ int main(int argc, char** argv)
         secondary_nodes_urls.push_back("http://localhost:" + std::to_string(port));
     }
 
-    auto perform_replication = [](const std::string& url, const std::string& message) -> bool {
-        const auto response = network::PostHttpAndWaitReply(url, message);
+    auto perform_replication = [](const std::string& url, const Message& message) -> bool {
+        std::string message_with_id = "[" + std::to_string(message.id) + "]" + message.message;
+        std::cout << "Sending to secondary: " << message_with_id << "\n";
+        const auto response = network::PostHttpAndWaitReply(url, message_with_id);
         // TODO: synchronize log by mutex
         std::cout << "Response from secondary (" << url << "): " << response << "\n";
 
-        const std::string success_response_content = ConstructAck(message);
+        const std::string success_response_content = ConstructAck(message.message);
         if (response.find(success_response_content) == std::string::npos) {
             // ACK not found
             return false;
         }
 
-        return true;  // for now - assume no failures
+        return true;
     };
+
+    size_t current_message_id = 0;
 
     // store pending replications
     std::vector<std::future<bool>> pending_replications;
@@ -193,27 +205,66 @@ int main(int argc, char** argv)
         Timer timer{"Post request handling"};
         std::cout << "Post message: " << str << "\n";
 
-        const auto post_message_data = ParsePostMessage(str);
+        const auto parse_result = ParseMessage(str);
 
-        size_t write_concern = post_message_data.write_concern;
+        Message current_message = [&]() {
+            if (!secondary_nodes_urls.empty()) {
+                return Message{
+                    parse_result.second,
+                    current_message_id++
+                };
+            }
+            else {
+                return Message{
+                    parse_result.second,
+                    parse_result.first
+                };
+            }
+        }();
 
-        if (write_concern > secondary_nodes_urls.size()) {
-            std::cerr << "Write concern is bigger than number of secondary nodes. Setting write concern to "
-                      << secondary_nodes_urls.size() << "\n";
-            write_concern = secondary_nodes_urls.size();
+        std::cout << "Message: " << current_message.message << " id: " << current_message.id << "\n";
+
+        std::atomic_size_t replication_counter = 0;
+
+        // for testing purposes - random timeout
+        if (secondary_nodes_urls.empty()) {
+            const auto timeout_ms = RandomTimeoutMs();
+            std::cout << "Delay for " << timeout_ms << "ms\n";
+            std::this_thread::sleep_for(std::chrono::milliseconds(timeout_ms));
         }
 
-        std::cout << "Message: " << post_message_data.message << " (" << MessageHash(post_message_data.message)
-                  << "): w = " << write_concern << "\n";
+        // store message in current node
+        InMemoryMessageStorage.push_back(current_message);
+        std::sort(InMemoryMessageStorage.begin(), InMemoryMessageStorage.end(), [](const Message& l, const Message& r) {
+            return l.id < r.id;
+        });
+        ++replication_counter;
 
         // perform replication if secondary nodes registered
         if (!secondary_nodes_urls.empty()) {
-            std::atomic_size_t replication_counter = 0;
+            PostContent post_message_data{parse_result.first, current_message.message};
+
+            const size_t write_concern = [&]() -> size_t {
+                if (post_message_data.write_concern < 1) {
+                    std::cerr << "Write concern < 1 does not make sense. Setting write concern to 1" << "\n";
+                    return 1u;
+                }
+                if (post_message_data.write_concern > secondary_nodes_urls.size() + 1) {
+                    std::cerr << "Write concern is bigger than number of secondary nodes. Setting write concern to "
+                              << secondary_nodes_urls.size() << "\n";
+                    return secondary_nodes_urls.size() + 1;
+                }
+                return post_message_data.write_concern;
+            }();
+
+            std::cout << "Message: " << post_message_data.message << " (" << MessageHash(post_message_data.message)
+                      << "): w = " << write_concern << "\n";
 
             std::vector<std::future<bool>> replication_results;
             for (const auto& secondary_url : secondary_nodes_urls) {
-                replication_results.push_back(std::async([&]() {
-                    const bool replication_result = perform_replication(secondary_url, post_message_data.message);
+                replication_results.push_back(std::async([secondary_url, current_message, perform_replication,
+                                                          &replication_counter]() {
+                    const bool replication_result = perform_replication(secondary_url, current_message);
                     if (replication_result) {
                         ++replication_counter;
                     }
@@ -222,7 +273,12 @@ int main(int argc, char** argv)
             }
 
             std::future<void> replication_future = std::async([&replication_counter, write_concern](){
+                size_t log_counter = 0;
                 while (replication_counter < write_concern) {
+                    if (++log_counter % 10 == 0) {
+                        std::cout << "Waiting for replication: " << replication_counter << " of " << write_concern
+                                  << "\n";
+                    }
                     std::this_thread::sleep_for(std::chrono::milliseconds{50});
                 }
             });
@@ -237,18 +293,7 @@ int main(int argc, char** argv)
             std::cout << "Replication with write concern " << write_concern << " finished" << "\n";
         }
 
-        // for testing purposes - random timeout
-        if (secondary_nodes_urls.empty()) {
-            const auto timeout_ms = RandomTimeoutMs();
-            std::cout << "Delay for " << timeout_ms << "ms\n";
-            std::this_thread::sleep_for(std::chrono::milliseconds(timeout_ms));
-        }
-
-
-
-        // add to in-memory storage only after replication performed
-        InMemoryMessageStorage.push_back(str);
-        return ConstructAck(str);
+        return ConstructAck(current_message.message);
     });
 
     // GET request handler: return list of messages from in-memory storage
