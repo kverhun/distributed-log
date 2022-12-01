@@ -6,13 +6,14 @@
 #include <iostream>
 #include <random>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 int RandomTimeoutMs()
 {
     std::random_device rd;
     std::mt19937 gen(rd());
-    std::uniform_int_distribution<> distr(100, 3000);
+    std::uniform_int_distribution<> distr(5000, 10000);
     return distr(gen);
 }
 
@@ -56,6 +57,63 @@ std::string MessageListResponseStr(const std::vector<std::string>& messages)
     }
     res += "]\n";
     return res;
+}
+
+/**
+ * Compute message hash. For logging and acknowledgement.
+ */
+std::string MessageHash(const std::string& message) {
+    return std::to_string(std::hash<std::string>()(message));
+}
+
+/**
+ * Construct acknowledgement response string
+ */
+std::string ConstructAck(const std::string& message) {
+    return std::string("Message received: " + MessageHash(message));
+}
+
+/**
+ * Post message content
+ */
+struct PostContent {
+    size_t write_concern{0u};
+    std::string message;
+};
+
+PostContent ParsePostMessage(const std::string& post_message) {
+    if (post_message.empty()) {
+        return PostContent{};
+    }
+
+    // no write concern specified
+    if (post_message[0] != '[') {
+        return PostContent{0u, post_message};
+    }
+
+    const auto close_bracket_idx = post_message.find_first_of(']');
+    if (close_bracket_idx != std::string::npos) {
+        std::string content_between_brackets;
+        content_between_brackets.assign(post_message.begin() + 1, post_message.begin() + close_bracket_idx);
+        try {
+            const size_t write_concern = std::atoi(content_between_brackets.c_str());
+            std::string message;
+            message.assign(post_message.begin() + close_bracket_idx + 1, post_message.end());
+            return PostContent{
+                write_concern,
+                message
+            };
+        }
+        catch (...) {
+            std::cout << "Fail to parse post message: " << post_message << "\n";
+        }
+    }
+
+    // parsing write concern unsuccessful
+    return PostContent {
+        0u,
+        post_message
+    };
 }
 
 /**
@@ -116,34 +174,67 @@ int main(int argc, char** argv)
     auto perform_replication = [](const std::string& url, const std::string& message) -> bool {
         const auto response = network::PostHttpAndWaitReply(url, message);
         // TODO: synchronize log by mutex
-        std::cout << "Response from secondary (" << url << "): " << response;
+        std::cout << "Response from secondary (" << url << "): " << response << "\n";
+
+        const std::string success_response_content = ConstructAck(message);
+        if (response.find(success_response_content) == std::string::npos) {
+            // ACK not found
+            return false;
+        }
+
         return true;  // for now - assume no failures
     };
+
+    // store pending replications
+    std::vector<std::future<bool>> pending_replications;
 
     // POST request handler: receive message
     server.SetRequestHandlerPost([&](const std::string& str) {
         Timer timer{"Post request handling"};
         std::cout << "Post message: " << str << "\n";
 
+        const auto post_message_data = ParsePostMessage(str);
+
+        size_t write_concern = post_message_data.write_concern;
+
+        if (write_concern > secondary_nodes_urls.size()) {
+            std::cerr << "Write concern is bigger than number of secondary nodes. Setting write concern to "
+                      << secondary_nodes_urls.size() << "\n";
+            write_concern = secondary_nodes_urls.size();
+        }
+
+        std::cout << "Message: " << post_message_data.message << " (" << MessageHash(post_message_data.message)
+                  << "): w = " << write_concern << "\n";
+
         // perform replication if secondary nodes registered
         if (!secondary_nodes_urls.empty()) {
+            std::atomic_size_t replication_counter = 0;
+
             std::vector<std::future<bool>> replication_results;
             for (const auto& secondary_url : secondary_nodes_urls) {
-                replication_results.push_back(std::async([&]() { return perform_replication(secondary_url, str); }));
+                replication_results.push_back(std::async([&]() {
+                    const bool replication_result = perform_replication(secondary_url, post_message_data.message);
+                    if (replication_result) {
+                        ++replication_counter;
+                    }
+                    return replication_result;
+                }));
             }
 
-            bool success = true;
-            for (auto& f : replication_results) {
-                if (!f.get()) {
-                    // assume doesn't happen for v1
-                    std::cerr << "Replication failed\n";
-                    success = false;
+            std::future<void> replication_future = std::async([&replication_counter, write_concern](){
+                while (replication_counter < write_concern) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds{50});
                 }
-            }
+            });
+            replication_future.get();
 
-            if (!success) {
-                return std::string("Message \"" + str + "\" declined");
-            }
+            // move pending replications to "backlog" to be completed later
+            pending_replications.insert(
+                pending_replications.end(), std::make_move_iterator(replication_results.begin()),
+                std::make_move_iterator(replication_results.end())
+            );
+
+            std::cout << "Replication with write concern " << write_concern << " finished" << "\n";
         }
 
         // for testing purposes - random timeout
@@ -153,9 +244,11 @@ int main(int argc, char** argv)
             std::this_thread::sleep_for(std::chrono::milliseconds(timeout_ms));
         }
 
+
+
         // add to in-memory storage only after replication performed
         InMemoryMessageStorage.push_back(str);
-        return std::string("Message \"" + str + "\" accepted\n");
+        return ConstructAck(str);
     });
 
     // GET request handler: return list of messages from in-memory storage
