@@ -17,6 +17,23 @@ so it is possible to POST new messages and GET messages while previous replicati
 Inconsistency can be generated most efficiently when multiple messages with w=1 are passed.
 Then, 5-10 seconds delay on secondaries allow to observe different set of messages.
 
+Main logic is located in [src/ReplicatedLogApp/ReplicatedLog.cpp](src/ReplicatedLogApp/ReplicatedLog.cpp) in `main()` function.
+
+1. Server is setup
+2. POST and GET handlers are set to handle corresponding requests
+
+Replication is run on POST request:
+1. Message is parsed (write concern or ID is read)
+2. For secondary node - random delay
+3. Message is appended to in-memory message storage
+4. Messages are sorted by ID to maintain order
+5. For master node:
+    - replication is triggered for each registered secondary
+    - waiting until write concern is fulfilled
+    - when write concern is fulfilled, other pending replications are moved to "backlog" to finish in background
+    - all finished replications are cleaned up
+6. Acknowledgement is returned
+    
 ### Usage example:
 
 ```sh
@@ -47,6 +64,14 @@ curl -X GET "http://localhost:8000" # -> [message1, message2]
 curl -X GET "http://localhost:8005" # -> [message1, message2]
 curl -X GET "http://localhost:8006" # -> [message1, message2]
 ```
+
+Example interaction 1 (1 master, 2 secondaries, basic scenario):
+
+![Example cmd](scr01.png)
+
+Example interaction 2 (1 master, 2 secondaries, "stress test" with multiple messages posted)
+
+![Example "stress test"](scr02.png)
 
 
 
