@@ -5,6 +5,7 @@
 #include <future>
 #include <iostream>
 #include <random>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -13,7 +14,7 @@ int RandomTimeoutMs()
 {
     std::random_device rd;
     std::mt19937 gen(rd());
-    std::uniform_int_distribution<> distr(5000, 10000);
+    std::uniform_int_distribution<> distr(5000, 10000); // 5-10 seconds
     return distr(gen);
 }
 
@@ -164,6 +165,11 @@ void SignalHandler(int) {
     interrupted = true;
 }
 
+struct ReplicationProcess {
+    std::vector<std::future<bool>> pending_replications;
+    std::atomic_size_t replication_count;
+};
+
 int main(int argc, char** argv)
 {
     AppConfig app_config = ParseCmdArgs(argc, argv);
@@ -196,7 +202,7 @@ int main(int argc, char** argv)
     size_t current_message_id = 0;
 
     // store pending replications
-    std::vector<std::future<bool>> pending_replications;
+    std::set<std::shared_ptr<ReplicationProcess>> pending_replications;
 
     // POST request handler: receive message
     server.SetRequestHandlerPost([&](const std::string& str) {
@@ -227,8 +233,6 @@ int main(int argc, char** argv)
 
         std::cout << "Message: " << current_message.message << " id: " << current_message.id << "\n";
 
-        std::atomic_size_t replication_counter = 0;
-
         // for testing purposes - random timeout on Secondaries
         if (secondary_nodes_urls.empty()) {
             const auto timeout_ms = RandomTimeoutMs();
@@ -236,12 +240,14 @@ int main(int argc, char** argv)
             std::this_thread::sleep_for(std::chrono::milliseconds(timeout_ms));
         }
 
+        auto replication_process = std::make_shared<ReplicationProcess>();
+
         // store message in current node
         InMemoryMessageStorage.push_back(current_message);
         std::sort(InMemoryMessageStorage.begin(), InMemoryMessageStorage.end(), [](const Message& l, const Message& r) {
             return l.id < r.id;
         });
-        ++replication_counter;
+        ++replication_process->replication_count;
 
         // perform replication if secondary nodes registered
         if (!secondary_nodes_urls.empty()) {
@@ -264,24 +270,23 @@ int main(int argc, char** argv)
                       << "): w = " << write_concern << "\n";
 
             // initialize replications
-            std::vector<std::future<bool>> replication_results;
             for (const auto& secondary_url : secondary_nodes_urls) {
-                replication_results.push_back(std::async([secondary_url, current_message, perform_replication,
-                                                          &replication_counter]() {
+                replication_process->pending_replications.push_back(std::async([secondary_url, current_message, perform_replication,
+                                                          replication_process]() {
                     const bool replication_result = perform_replication(secondary_url, current_message);
                     if (replication_result) {
-                        ++replication_counter;
+                        ++replication_process->replication_count;
                     }
                     return replication_result;
                 }));
             }
 
             // wait until write concern is satisfied
-            std::future<void> replication_future = std::async([&replication_counter, write_concern](){
+            std::future<void> replication_future = std::async([&replication_process, write_concern](){
                 size_t log_counter = 0;
-                while (replication_counter < write_concern) {
+                while (replication_process->replication_count < write_concern) {
                     if (++log_counter % 10 == 0) {
-                        std::cout << "Waiting for replication: " << replication_counter << " of " << write_concern
+                        std::cout << "Waiting for replication: " << replication_process->replication_count << " of " << write_concern
                                   << "\n";
                     }
                     std::this_thread::sleep_for(std::chrono::milliseconds{50});
@@ -290,13 +295,24 @@ int main(int argc, char** argv)
             replication_future.get();
 
             // move pending replications to "backlog" to be completed later
-            pending_replications.insert(
-                pending_replications.end(), std::make_move_iterator(replication_results.begin()),
-                std::make_move_iterator(replication_results.end())
-            );
+            pending_replications.insert(replication_process);
 
             std::cout << "Replication with write concern " << write_concern << " finished" << "\n";
         }
+
+        // cleanup fully perfomed replications
+        for (auto it = pending_replications.begin(); it != pending_replications.end();) {
+            if (std::all_of((*it)->pending_replications.begin(), (*it)->pending_replications.end(), [](const std::future<bool>& f){
+                    return f.wait_for(std::chrono::milliseconds{0}) == std::future_status::ready;
+                })) {
+                pending_replications.erase(it++);
+            }
+            else {
+                ++it;
+            }
+        }
+
+        std::cout << "Pending replications: " << pending_replications.size() << "\n";
 
         // reply acknowledgement
         return ConstructAck(current_message.message);

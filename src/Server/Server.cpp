@@ -61,9 +61,6 @@ void mongoose_handler(mg_connection* c, int ev, void* ev_data, void* fn_data)
         std::cout << "  Request type: " << ToString(request_type) << "\n";
 
         std::cout << "Connection: " << c << " id: " << c->id << "\n";
-        // TODO: implement ASYNC properly. see https://mongoose.ws/tutorials/multi-threaded/
-        c->is_resp = 1;
-
 
         switch (request_type) {
             case RequestType::Get:
@@ -77,14 +74,16 @@ void mongoose_handler(mg_connection* c, int ev, void* ev_data, void* fn_data)
                 mg_http_reply(c, 200, "Content-Type: text/plain\r\n", "Unknown request type");
                 break;
         }
-        // mg_http_reply(c, 200, "Content-Type: text/plain\r\n", str.c_str())
+    }
+    else if (ev == MG_EV_CLOSE){
+        std::cout << "Connection " << c << " is closed\n";
     }
 }
 
 Server::Server(size_t port) : m_port(port)
 {
     mg_mgr_init(&m_mongoose_manager);
-
+    mg_log_set(MG_LL_DEBUG);
     std::string address = "http://localhost:";
     address += std::to_string(m_port);
     std::cout << "Server on url: " << address << " created\n";
@@ -102,11 +101,12 @@ void Server::OnGetRequest(std::string request_body, mg_connection* connection)
     if (!m_handler_get) {
         throw std::logic_error("No GET handler set");
     }
-    connection->is_resp = 1;
+
     const std::lock_guard lck{m_pending_requests_mutex};
-    m_pending_requests.push_back(std::async([&](){
+    m_pending_requests.push_back(std::async([this, connection, request_body](){
         return Response{m_handler_get(request_body), connection};
     }));
+    std::cout << "Get request registered\n";
 }
 
 void Server::OnPostRequest(std::string request_body, mg_connection* connection)
@@ -114,11 +114,12 @@ void Server::OnPostRequest(std::string request_body, mg_connection* connection)
     if (!m_handler_post) {
         throw std::logic_error("No POST handler set");
     }
-    connection->is_resp = 1;
+
     const std::lock_guard lck{m_pending_requests_mutex};
-    m_pending_requests.push_back(std::async([&](){
+    m_pending_requests.push_back(std::async([this, connection, request_body](){
         return Response{m_handler_post(request_body), connection};
     }));
+    std::cout << "Post request registered\n";
 }
 
 void Server::Listen(const std::atomic_bool& stopped)
@@ -133,8 +134,8 @@ void Server::Listen(const std::atomic_bool& stopped)
             for (auto& f : m_pending_requests) {
                 if (f.valid() && f.wait_for(std::chrono::milliseconds{0}) == std::future_status::ready) {
                     const auto response = f.get();
+                    std::cout << "Connection c=" << response.c << " msg: " << response.message << "\n";
                     mg_http_reply(response.c, 200, "Content-Type: text/plain\r\n", response.message.c_str());
-                    response.c->is_resp = 0;
                 }
                 m_pending_requests.erase(
                     std::remove_if(
@@ -145,7 +146,7 @@ void Server::Listen(const std::atomic_bool& stopped)
             }
         }
 
-        mg_mgr_poll(&m_mongoose_manager, 10);
+        mg_mgr_poll(&m_mongoose_manager, 100);
     }
 }
 
