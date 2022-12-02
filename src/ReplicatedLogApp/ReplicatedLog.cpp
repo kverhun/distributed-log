@@ -166,8 +166,6 @@ void SignalHandler(int) {
 
 int main(int argc, char** argv)
 {
-    // TODO: weird port if no arguments specified
-
     AppConfig app_config = ParseCmdArgs(argc, argv);
 
     // initialize app server
@@ -205,16 +203,21 @@ int main(int argc, char** argv)
         Timer timer{"Post request handling"};
         std::cout << "Post message: " << str << "\n";
 
+        // input message may contain a number before a message
+        // for master node it is write concern, for secondary node it is message id
+        // TODO: pass proper json or other parsable structure as a message
         const auto parse_result = ParseMessage(str);
 
         Message current_message = [&]() {
             if (!secondary_nodes_urls.empty()) {
+                // we are master node - generate new message ID
                 return Message{
                     parse_result.second,
                     current_message_id++
                 };
             }
             else {
+                // we are secondary node - pick up message ID as passed
                 return Message{
                     parse_result.second,
                     parse_result.first
@@ -226,7 +229,7 @@ int main(int argc, char** argv)
 
         std::atomic_size_t replication_counter = 0;
 
-        // for testing purposes - random timeout
+        // for testing purposes - random timeout on Secondaries
         if (secondary_nodes_urls.empty()) {
             const auto timeout_ms = RandomTimeoutMs();
             std::cout << "Delay for " << timeout_ms << "ms\n";
@@ -260,6 +263,7 @@ int main(int argc, char** argv)
             std::cout << "Message: " << post_message_data.message << " (" << MessageHash(post_message_data.message)
                       << "): w = " << write_concern << "\n";
 
+            // initialize replications
             std::vector<std::future<bool>> replication_results;
             for (const auto& secondary_url : secondary_nodes_urls) {
                 replication_results.push_back(std::async([secondary_url, current_message, perform_replication,
@@ -272,6 +276,7 @@ int main(int argc, char** argv)
                 }));
             }
 
+            // wait until write concern is satisfied
             std::future<void> replication_future = std::async([&replication_counter, write_concern](){
                 size_t log_counter = 0;
                 while (replication_counter < write_concern) {
@@ -293,6 +298,7 @@ int main(int argc, char** argv)
             std::cout << "Replication with write concern " << write_concern << " finished" << "\n";
         }
 
+        // reply acknowledgement
         return ConstructAck(current_message.message);
     });
 
