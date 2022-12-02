@@ -60,22 +60,24 @@ void mongoose_handler(mg_connection* c, int ev, void* ev_data, void* fn_data)
         const auto request_type = GetRequestType(message);
         std::cout << "  Request type: " << ToString(request_type) << "\n";
 
-        std::string response;
+        std::cout << "Connection: " << c << " id: " << c->id << "\n";
+        // TODO: implement ASYNC properly. see https://mongoose.ws/tutorials/multi-threaded/
+        c->is_resp = 1;
+
 
         switch (request_type) {
             case RequestType::Get:
-                response = server->OnGetRequest(message.body.ptr);
+                server->OnGetRequest(message.body.ptr, c);
                 break;
             case RequestType::Post:
-                response = server->OnPostRequest(message.body.ptr);
+                server->OnPostRequest(message.body.ptr, c);
                 break;
             default:
                 std::cout << "  Request type: " << message.method.ptr << "\n";
-                response = "Unknown request type";
+                mg_http_reply(c, 200, "Content-Type: text/plain\r\n", "Unknown request type");
                 break;
         }
-
-        mg_http_reply(c, 200, "Content-Type: text/plain\r\n", response.c_str());
+        // mg_http_reply(c, 200, "Content-Type: text/plain\r\n", str.c_str())
     }
 }
 
@@ -95,20 +97,28 @@ void Server::SetRequestHandlerGet(Server::RequestHandler handler) { m_handler_ge
 
 void Server::SetRequestHandlerPost(Server::RequestHandler handler) { m_handler_post = handler; }
 
-std::string Server::OnGetRequest(const std::string& request_body)
+void Server::OnGetRequest(std::string request_body, mg_connection* connection)
 {
     if (!m_handler_get) {
         throw std::logic_error("No GET handler set");
     }
-    return m_handler_get(request_body);
+    connection->is_resp = 1;
+    const std::lock_guard lck{m_pending_requests_mutex};
+    m_pending_requests.push_back(std::async([&](){
+        return Response{m_handler_get(request_body), connection};
+    }));
 }
 
-std::string Server::OnPostRequest(const std::string& request_body)
+void Server::OnPostRequest(std::string request_body, mg_connection* connection)
 {
     if (!m_handler_post) {
         throw std::logic_error("No POST handler set");
     }
-    return m_handler_post(request_body);
+    connection->is_resp = 1;
+    const std::lock_guard lck{m_pending_requests_mutex};
+    m_pending_requests.push_back(std::async([&](){
+        return Response{m_handler_post(request_body), connection};
+    }));
 }
 
 void Server::Listen(const std::atomic_bool& stopped)
@@ -117,7 +127,25 @@ void Server::Listen(const std::atomic_bool& stopped)
         if (stopped) {
             break;
         }
-        mg_mgr_poll(&m_mongoose_manager, 1000);
+
+        {
+            const std::lock_guard lck{m_pending_requests_mutex};
+            for (auto& f : m_pending_requests) {
+                if (f.valid() && f.wait_for(std::chrono::milliseconds{0}) == std::future_status::ready) {
+                    const auto response = f.get();
+                    mg_http_reply(response.c, 200, "Content-Type: text/plain\r\n", response.message.c_str());
+                    response.c->is_resp = 0;
+                }
+                m_pending_requests.erase(
+                    std::remove_if(
+                        m_pending_requests.begin(), m_pending_requests.end(), [](const auto& f) { return !f.valid(); }
+                    ),
+                    m_pending_requests.end()
+                );
+            }
+        }
+
+        mg_mgr_poll(&m_mongoose_manager, 10);
     }
 }
 

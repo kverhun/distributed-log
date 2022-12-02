@@ -3,6 +3,9 @@
 #include <atomic>
 #include <cstddef>
 #include <functional>
+#include <future>
+#include <mutex>
+#include <vector>
 
 #include <mongoose.h>
 
@@ -18,8 +21,8 @@ public:
     Server(size_t port);
     Server(const Server&) = delete;
     Server& operator=(const Server&) = delete;
-    Server(Server&&) = default;
-    Server& operator=(Server&&) = default;
+    Server(Server&&) = delete;
+    Server& operator=(Server&&) = delete;
     ~Server();
 
     /**
@@ -49,13 +52,20 @@ public:
 private:
     friend void mongoose_handler(mg_connection* c, int ev, void* ev_data, void* fn_data);
 
-    std::string OnGetRequest(const std::string&);
-    std::string OnPostRequest(const std::string& request_body);
+    void OnGetRequest(std::string request, mg_connection* connection);
+    void OnPostRequest(std::string request_body, mg_connection* connection);
 
 private:
     size_t m_port;
     Server::RequestHandler m_handler_get;
     Server::RequestHandler m_handler_post;
+
+    struct Response {
+        std::string message;
+        mg_connection* c;
+    };
+    mutable std::mutex m_pending_requests_mutex;
+    std::vector<std::future<Response>> m_pending_requests;
 
     mg_mgr m_mongoose_manager;
 };
