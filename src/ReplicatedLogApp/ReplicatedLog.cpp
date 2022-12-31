@@ -165,9 +165,30 @@ void SignalHandler(int) {
     interrupted = true;
 }
 
+/**
+ * Helper function to perform replication processes of a `message` to a secondary node defined by `url`
+ * Checks reply for acknowledgement (according to internal protocol)
+ * @return true if replication was successful, false otherwise
+ */
+bool PerformReplication(const std::string& url, const Message& message) {
+    std::string message_with_id = "[" + std::to_string(message.id) + "]" + message.message;
+    std::cout << "Sending to secondary: " << message_with_id << "\n";
+    const auto response = network::PostHttpAndWaitReply(url, message_with_id);
+    // TODO: synchronize log by mutex
+    std::cout << "Response from secondary (" << url << "): " << response << "\n";
+
+    const std::string success_response_content = ConstructAck(message.message);
+    if (response.find(success_response_content) == std::string::npos) {
+        // ACK not found
+        return false;
+    }
+
+    return true;
+}
+
 struct ReplicationProcess {
     std::vector<std::future<bool>> pending_replications;
-    std::atomic_size_t replication_count;
+    std::atomic_size_t replication_count; // number of successful replication for this message
 };
 
 int main(int argc, char** argv)
@@ -182,22 +203,6 @@ int main(int argc, char** argv)
     for (const auto& port : app_config.secondary_apps_ports) {
         secondary_nodes_urls.push_back("http://localhost:" + std::to_string(port));
     }
-
-    auto perform_replication = [](const std::string& url, const Message& message) -> bool {
-        std::string message_with_id = "[" + std::to_string(message.id) + "]" + message.message;
-        std::cout << "Sending to secondary: " << message_with_id << "\n";
-        const auto response = network::PostHttpAndWaitReply(url, message_with_id);
-        // TODO: synchronize log by mutex
-        std::cout << "Response from secondary (" << url << "): " << response << "\n";
-
-        const std::string success_response_content = ConstructAck(message.message);
-        if (response.find(success_response_content) == std::string::npos) {
-            // ACK not found
-            return false;
-        }
-
-        return true;
-    };
 
     size_t current_message_id = 0;
 
@@ -271,14 +276,23 @@ int main(int argc, char** argv)
 
             // initialize replications
             for (const auto& secondary_url : secondary_nodes_urls) {
-                replication_process->pending_replications.push_back(std::async([secondary_url, current_message, perform_replication,
-                                                          replication_process]() {
-                    const bool replication_result = perform_replication(secondary_url, current_message);
-                    if (replication_result) {
-                        ++replication_process->replication_count;
-                    }
-                    return replication_result;
-                }));
+                replication_process->pending_replications.push_back(
+                    std::async([secondary_url, current_message, replication_process]() {
+                        bool success = false;
+                        while (!success) {
+                            const bool replication_result = PerformReplication(secondary_url, current_message);
+                            if (replication_result) {
+                                std::cout << "Successful replication to " << secondary_url << "\n";
+                                ++replication_process->replication_count;
+                                success = true;
+                            }
+                            else {
+                                std::this_thread::sleep_for(std::chrono::seconds{1});
+                            }
+                        }
+                        return success;
+                    })
+                );
             }
 
             // wait until write concern is satisfied
@@ -300,7 +314,7 @@ int main(int argc, char** argv)
             std::cout << "Replication with write concern " << write_concern << " finished" << "\n";
         }
 
-        // cleanup fully perfomed replications
+        // cleanup fully performed replications
         for (auto it = pending_replications.begin(); it != pending_replications.end();) {
             if (std::all_of((*it)->pending_replications.begin(), (*it)->pending_replications.end(), [](const std::future<bool>& f){
                     return f.wait_for(std::chrono::milliseconds{0}) == std::future_status::ready;
@@ -314,6 +328,7 @@ int main(int argc, char** argv)
 
         std::cout << "Pending replications: " << pending_replications.size() << "\n";
 
+        // TODO: this reply should be sent only after WC is satisfied
         // reply acknowledgement
         return ConstructAck(current_message.message);
     });
@@ -321,7 +336,21 @@ int main(int argc, char** argv)
     // GET request handler: return list of messages from in-memory storage
     server.SetRequestHandlerGet([](const std::string& str) {
         std::cout << "Get message: " << str << "\n";
-        return MessageListResponseStr(InMemoryMessageStorage);
+        // to guarantee the total order, we use the fact that IDs are generated sequentially:
+        // if an ID is missing, that means there exists a message which hasn't been replicated to the current node yet.
+        std::vector<Message> messages_to_display;
+        size_t expected_next_message_id = 0;
+        for (const auto& m : InMemoryMessageStorage) {
+            if (m.id == expected_next_message_id) {
+                messages_to_display.push_back(m);
+                ++expected_next_message_id;
+            }
+            else {
+                std::cout << "Message with ID " << expected_next_message_id << " is not replicated yet\n";
+                break;
+            }
+        }
+        return MessageListResponseStr(messages_to_display);
     });
 
     // run server

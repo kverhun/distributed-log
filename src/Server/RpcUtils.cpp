@@ -24,7 +24,7 @@ std::string exec(const char* cmd)
 
 std::string PostHttpAndWaitReply(const std::string& url, const std::string& message)
 {
-    std::string cmd = "curl -d \"";
+    std::string cmd = "curl -s -d \"";
     cmd += message;
     cmd += "\" -X POST \"";
     cmd += url;
